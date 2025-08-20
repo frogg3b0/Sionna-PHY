@@ -1,7 +1,7 @@
-## Part 1: Getting Started with Sionna
+# Part 1: Getting Started with Sionna
 
 
-### Communication Systems as Sionna Blocks 
+## Communication Systems as Sionna Blocks 
 
 在 Sionna 中，為了更方便建立完整的通訊系統模，通常會將一整套收發流程包裝成一個「class」  
 - 如:位元產生 → 映射 → 通道 → 解調
@@ -10,7 +10,6 @@
 之後只要輸入變數，就能根據該class內的流程產生輸出，換句話說，我們可以事先定義好模型要用的模組、通道、調變器等元件  
 - 在 __init__() 中初始化
 - 在 __call__() 中呼叫 
-
 
 範例如下:  
 ```python
@@ -105,3 +104,7 @@ def call(self,batch_size, ebn0_db)
 `return bits, llr`  
 * bits: 傳送端產生的原始binary_source
 * llr: 接收端針對y去demapper後，針對產生的0,1的估計信心值
+
+***
+### 針對uncoded系統在AWGN通道下的BER
+
