@@ -78,7 +78,7 @@ def call(self,batch_size, ebn0_db)
 ```  
 在 `sionna.phy.Block` 中， `call()` 是預留給你用來定義這個block「執行時做什麼」的地方  
 * `self`: 為了在 class 裡面記住自己有哪些變數跟功能，因此會使用 `self.變數名稱 = 變數 ` 
-* `batch_size`: 這次模擬的資料有幾筆
+* `batch_size`: 一共有幾筆bit vector
 * `ebn0_db`: 這次模擬使用的Eb/N0
 
 `sionna.phy.utils.ebnodb2no(ebno_db, num_bits_per_symbol=self.num_bits_per_symbol, coderate=1.0)`  
@@ -145,13 +145,14 @@ ber_plots.simulate(model_uncoded_awgn,
 ```
 * `ber_plots = sionna.phy.utils.PlotBER("AWGN")`: 建立一個BER模擬器以及繪圖器
 * `ber_plots.simulate()`: 使用剛剛定義的繪圖器進行模擬
-* `model_uncoded_awgn`
-* `ebno_dbs=np.linspace(EBN0_DB_MIN, EBN0_DB_MAX, 20)`
-* `batch_size=BATCH_SIZE`
-* `num_target_block_errors`
-* `legend="Uncoded`
-* `soft_estimates=True`
-* `max_mc_iter=100`
-* `show_fig=True` 
-
+* `model_uncoded_awgn`: 建立一個模型，即上面建立的 UncodedSystemAWGN
+* `ebno_dbs=np.linspace(EBN0_DB_MIN, EBN0_DB_MAX, 20)`: 以 numpy 產生從 -3 到 5dB 的 20 點 Eb/N₀
+* `batch_size=BATCH_SIZE`: 一共有幾筆block (一個block即為一個bit vector)
+* `num_target_block_errors`: 每個symbol至少有一個bit error
+* `legend="Uncoded`: 曲線文字
+* `soft_estimates=True`: 用 LLR 進行估計
+* `max_mc_iter=100`: 最多進行 100 輪蒙地卡羅模擬
+* `show_fig=True` :是否畫出 BER 曲線圖，True
+接著，Sionna會印出每個 Eb/N₀ 的 BER 與 BLER的表格，同時產生 AWGN & Eb/N0 圖表
+<img width="657" height="425" alt="image" src="https://github.com/user-attachments/assets/51d3208e-41d3-4bf7-936c-da51743a240d" />
 
