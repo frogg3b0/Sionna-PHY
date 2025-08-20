@@ -11,7 +11,7 @@
 - 在 __init__() 中初始化
 - 在 __call__() 中呼叫 
 
-範例如下:  
+### 範例如下:  
 ```python
 class UncodedSystemAWGN(sionna.phy.Block):
     def __init__(self, num_bits_per_symbol, block_length):
@@ -42,14 +42,14 @@ class UncodedSystemAWGN(sionna.phy.Block):
 
 ***
 
-**定義一個新的Class，名為UncodedSystemAWGN:**  
+#### 定義一個新的Class，名為UncodedSystemAWGN:**  
 ```python
 class UncodedSystemAWGN(sionna.phy.Block):
 ```
 這個 `UncodedSystemAWGN` 首先會呼叫 `sionna.phy.Block` ，代表 `UncodedSystemAWGN` 繼承了 `sionna.phy.Block` 的功能  
 所以這個 `class` 會變成一個 Sionna Block，能被其他 Block 串接與訓練  
 
-**def __init__()**
+##### def __init__()
 ```python
 def __init__(self, num_bits_per_symbol, block_length):
 ```
@@ -71,10 +71,8 @@ self.demapper = sionna.phy.mapping.Demapper("app", constellation=self.constellat
 self.binary_source = sionna.phy.mapping.BinarySource() # 定義一個binary source，來創建 0,1 位元訊號
 self.awgn_channel = sionna.phy.channel.AWGN() # 創造一個 AWGN 通道
 ```
-
 ***
-
-**def call()**  
+##### def call()
 ```python
 def call(self,batch_size, ebn0_db)
 ```  
@@ -84,7 +82,7 @@ def call(self,batch_size, ebn0_db)
 * `ebn0_db`: 這次模擬使用的Eb/N0
 
 `sionna.phy.utils.ebnodb2no(ebno_db, num_bits_per_symbol=self.num_bits_per_symbol, coderate=1.0)`  
-`sionna.phy.utils.ebnodb2no` 會根據括號內的參數，自動計算出相對應的N0
+會根據括號內的參數，自動計算出相對應的N0  
 * ebno_db: 輸入的Eb/N0，單位為dB
 * num_bits_per_symbol: 單位符號的bit，會根據def __init__()內的設定而改變
 * coderate: 編碼率，實際傳送的bit/經過通道編碼後的bit。若為1代表沒有編碼  
@@ -104,7 +102,56 @@ def call(self,batch_size, ebn0_db)
 `return bits, llr`  
 * bits: 傳送端產生的原始binary_source
 * llr: 接收端針對y去demapper後，針對產生的0,1的估計信心值
-
 ***
-### 針對uncoded系統在AWGN通道下的BER
+### 如何使用class UncodedSystemAWGN?
+現在我們已經定義好一個class了，現在要來使用它
+#### Step1: 建立一個模型，並初始化它
+```python
+model = UncodedSystemAWGN(num_bits_per_symbol=2, block_length=1024)
+```
+這時:  
+* `__init__()`就會被呼叫
+* 會根據我們輸入的`num_bits_per_symbol`和`block_length`初始化這個模型  
+#### Step2: 呼叫這個模型來模擬一筆資料傳輸
+```python
+bits, llr = model(batch_size=2000, ebno_db=5.0)
+```
+這時:  
+* `call()`函數會被執行
+* 會根據我們指定的`batch size` 和 `Eb/N₀`
+* 產生隨機的bit vector -> symbol(星座點) -> AWGN -> demapping後計算LLR -> 回傳 `(bits,llr)`  
+
+#### 補充說明:  
+* num_bits_per_symbol、block_length → 在你**建立模型時**自己指定
+* batch_size、ebno_db → 在你**呼叫模型時**給定的輸入參數
+***
+### 針對uncoded系統在AWGN通道下的BER  
+```python
+model_uncoded_awgn = UncodedSystemAWGN(num_bits_per_symbol=NUM_BITS_PER_SYMBOL, block_length=1024)  
+
+EBN0_DB_MIN = -3.0 # Minimum value of Eb/N0 [dB] for simulations
+EBN0_DB_MAX = 5.0 # Maximum value of Eb/N0 [dB] for simulations
+BATCH_SIZE = 2000 # How many examples are processed by Sionna in parallel
+
+ber_plots = sionna.phy.utils.PlotBER("AWGN")
+ber_plots.simulate(model_uncoded_awgn,
+                  ebno_dbs=np.linspace(EBN0_DB_MIN, EBN0_DB_MAX, 20),
+                  batch_size=BATCH_SIZE,
+                  num_target_block_errors=100, # simulate until 100 block errors occured
+                  legend="Uncoded",
+                  soft_estimates=True,
+                  max_mc_iter=100, # run 100 Monte-Carlo simulations (each with batch_size samples)
+                  show_fig=True);
+```
+* `ber_plots = sionna.phy.utils.PlotBER("AWGN")`: 建立一個BER模擬器以及繪圖器
+* `ber_plots.simulate()`: 使用剛剛定義的繪圖器進行模擬
+* `model_uncoded_awgn`
+* `ebno_dbs=np.linspace(EBN0_DB_MIN, EBN0_DB_MAX, 20)`
+* `batch_size=BATCH_SIZE`
+* `num_target_block_errors`
+* `legend="Uncoded`
+* `soft_estimates=True`
+* `max_mc_iter=100`
+* `show_fig=True` 
+
 
