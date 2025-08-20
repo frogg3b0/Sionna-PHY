@@ -18,7 +18,7 @@
 
 之後只要輸入變數，就能根據該class內的流程產生輸出，換句話說，我們可以事先定義好模型要用的模組、通道、調變器等元件  
 - 在 __init__() 中初始化
-- 在 __call__() 中實作前向推論（forward pass)  
+- 在 __call__() 中呼叫 
 
 
 範例如下:  
@@ -52,20 +52,26 @@ class UncodedSystemAWGN(sionna.phy.Block):
 
 ***
 
-**第一步：你定義一個新的系統 UncodedSystemAWGN:**  
+**定義一個新的Class，名為UncodedSystemAWGN:**  
 ```python
 class UncodedSystemAWGN(sionna.phy.Block):
 ```
 這個 `UncodedSystemAWGN` 首先會呼叫 `sionna.phy.Block` ，代表 `UncodedSystemAWGN` 繼承了 `sionna.phy.Block` 的功能  
 所以這個 `class` 會變成一個 Sionna Block，能被其他 Block 串接與訓練  
 
-**第二步：呼叫 super().__init__():**  
+**def __init__()**
 ```python
-super().__init__():
+def __init__(self, num_bits_per_symbol, block_length):
 ```
-這行就是把 `sionna.phy.Block` 的東西初始化  
-**第三步：自己定義這個 block 裡會用到哪些元件（像是 Mapper, Demapper）:**  
-* 為了在 class 裡面記住自己有哪些變數跟功能，因此會使用 `self.變數名稱 = 變數 `  
+`__init__()`  
+是 Python class 中的固定用法，可以想像成你在創建tranceiver的時候，要先設定兩個東西：  
+* num_bits_per_symbol：一個 symbol 裡面包含幾個 bit
+* block_length：一次傳送幾個 bit
+ 
+`super().__init__()`  
+用來把 `sionna.phy.Block` 內的參數初始化  
+
+`self.變數名稱 = 變數 ` :為了在 class 裡面記住自己有哪些變數跟功能，換句話說在這邊會自己定義這個 block 裡會用到哪些元件（像是 Mapper, Demapper）
 ```python
 self.num_bits_per_symbol = num_bits_per_symbol  # 我要用幾個 bit 做成一個 symbol
 self.block_length = block_length # 每一筆訊息有多長
@@ -76,12 +82,48 @@ self.binary_source = sionna.phy.mapping.BinarySource() # 定義一個binary sour
 self.awgn_channel = sionna.phy.channel.AWGN() # 創造一個 AWGN 通道
 ```
 
+***
+
+**def call()**  
+```python
+def call(self,batch_size, ebn0_db)
+```  
+在 `sionna.phy.Block` 中， `call()` 是預留給你用來定義這個block「執行時做什麼」的地方  
+* `self`: 為了在 class 裡面記住自己有哪些變數跟功能，因此會使用 `self.變數名稱 = 變數 ` 
+* `batch_size`: 這次模擬的資料有幾筆
+* `ebn0_db`: 這次模擬使用的Eb/N0
+
+`sionna.phy.utils.ebnodb2no(ebno_db, num_bits_per_symbol=self.num_bits_per_symbol, coderate=1.0)`  
+`sionna.phy.utils.ebnodb2no` 會根據括號內的參數，自動計算出相對應的N0
+* ebno_db: 輸入的Eb/N0，單位為dB
+* num_bits_per_symbol: 單位符號的bit，會根據def __init__()內的設定而改變
+* coderate: 編碼率，實際傳送的bit/經過通道編碼後的bit。若為1代表沒有編碼  
+
+`bits = self.binary_source([batch_size, self.block_length])`  
+用`binary_source`隨機產生一組shape為[batch_size, self.block_length]的bit data  
+
+`x=self.mapper(bits)`  
+根據__init__()設定的modulation，把bit data mapping到星座圖上
+
+`y=self.awgn_channel(x,N0)`  
+把剛剛mapping到星座圖上星座點，送進AWGN通道內
+
+`llr = self.demapper(y,no)`  
+針對接收符號y，透過 LLR(log-likelihood ratio)， 把symbol轉回成0,1的bit data  
+
+`return bits, llr`  
+* bits: 傳送端產生的原始binary_source
+* llr: 接收端針對y去demapper後，針對產生的0,1的估計信心值
+  
+
+
+
+
 
 
 
   
 
-#### Sionna block code
 
 
 
