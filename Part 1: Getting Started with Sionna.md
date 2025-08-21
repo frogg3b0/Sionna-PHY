@@ -156,3 +156,136 @@ ber_plots.simulate(model_uncoded_awgn,
 接著，Sionna會印出每個 Eb/N₀ 的 BER 與 BLER的表格，同時產生 AWGN & Eb/N0 圖表
 <img width="657" height="425" alt="image" src="https://github.com/user-attachments/assets/51d3208e-41d3-4bf7-936c-da51743a240d" />
 
+***
+
+## Forward Error Correction (FEC)
+接下來我們會在收發器中新增通道編碼，以增強其對傳輸錯誤的robust  
+為此，我們將使用符合 5G 標準的**低密度奇偶校驗 (LDPC) 碼**和**極化碼**  
+
+```python
+k = 12
+n = 20
+encoder = sionna.phy.fec.ldpc.LDPC5GEncoder(k, n)
+decoder = sionna.phy.fec.ldpc.LDPC5GDecoder(encoder, hard_out=True)
+```
+* `k`: 原始訊號的bit數
+* `n`: 編碼後的bit數
+* `encoder=sionna.phy.fec.ldpc.LDPC5GEncoder(k,n)`: 對應到LDCP編碼器，針對 k bit 產生 n bit
+* `decoder = sionna.phy.fec.ldpc.LDPC5GDecoder(encoder,hard_out=True)`: 上方encoder對應的解碼器，這裡設定 `hard_out=True`表示解碼後輸出為(0,1)，而非soft value (llr)
+
+### 簡單做個範例
+```python
+BATCH_SIZE = 1 
+u = binary_source([BATCH_SIZE, k])
+c = encoder(u)
+
+print("Input bits are: \n", u.numpy())
+print("Encoded bits are: \n", c.numpy())
+```
+Input bits are:  
+ [[0. 0. 0. 0. 1. 0. 0. 1. 1. 1. 1. 1.]]  
+Encoded bits are:  
+ [[1. 0. 0. 1. 1. 1. 1. 1. 0. 1. 1. 0. 1. 1. 1. 1. 0. 1. 1. 0.]]  
+ * 將原始12-bit經由LDCP編碼後，得到20bit的codeword
+
+***
+
+### 在多用戶、多基地台、多樣本(batch)的架構下，使用 5G LDCP
+Sionna也支援多維度的tensor，意思是我們可以同時處理
+* 多個用戶
+* 多根天線
+* 多個樣本
+
+```python
+BATCH_SIZE = 10
+num_basestations = 4
+num_users = 5 
+n = 1000 # codeword length per transmitted codeword
+coderate = 0.5 # coderate
+k = int(coderate * n) # number of info bits per codeword
+
+encoder = sionna.phy.fec.ldpc.LDPC5GEncoder(k, n)
+decoder = sionna.phy.fec.ldpc.LDPC5GDecoder(encoder,
+                                    hard_out=True, # 輸出為0,1，否則為LLR
+                                    return_infobits=True, # 是否只輸出資訊位元，否則 also return (decoded) parity bits
+                                    num_iter=20, # 解碼演算法迭代次數
+                                    cn_update="boxplus-phi") # 檢查節點更新方式
+
+# 產生輸入資料並編碼
+u = binary_source([BATCH_SIZE, num_basestations, num_users, k])
+c = encoder(u)
+
+print("Shape of u: ", u.shape)
+print("Shape of c: ", c.shape)
+print("Total number of processed bits: ", np.prod(c.shape))
+```
+Shape of u:  (10, 4, 5, 500)  
+Shape of c:  (10, 4, 5, 1000)  
+Total number of processed bits:  200000  
+
+### 將 LDPC code 替換為 Polar code
+```python
+k = 64
+n = 128
+encoder = sionna.phy.fec.polar.Polar5GEncoder(k, n)
+decoder = sionna.phy.fec.polar.Polar5GDecoder(encoder,
+                                      dec_type="SCL") # you can also use "SCL"
+```
+這樣的寫法會自動處理以下步驟:    
+* Rate matching: 根據你指定的(n,k)，自動調整實際傳輸位元
+* CRC concatenation: 自動在資訊位元後面加上**CRC bit**，讓解碼時能除錯
+* `dec_type="SLC`: 內建選擇解碼器類型，此次範例為 `SCL` 代表使用 Successive Cancellation List 解碼器
+這就是標準 5G Polar code chain 的作法，整體流程是符合 3GPP 標準的，你不需要再手動控制 CRC 或 rate-matching
+
+***
+
+## Eager vs Graph Mode — 動態執行 vs 圖模式加速執行
+目前為止，這個教學中的程式碼都在 Eager Mode（即時模式） 下執行
+* Eager mode 是 TensorFlow 的一種執行模式，讓你像使用 NumPy 那樣，逐行執行每一個 TensorFlow 的操作
+* 好處是便於除錯與開發，因為你可以即時觀察每一步的輸出結果
+* 這對初學者來說非常直覺，但在運行大型模擬（如 Sionna 通訊系統）時，效率就不如 Graph mode。  
+
+若要完整發揮 Sionna 在 通訊系統模擬 中的計算效能，我們需要啟用 Graph mode（圖模式）
+* Graph mode 是 TensorFlow 的另一種執行方式
+* 會先把你的 Python 函式「編譯」成靜態的計算圖（computational graph）
+* 然後在底層以最佳化方式執行，通常有顯著的加速效果，尤其是大量批次資料（batch）處理
+
+### 開啟方式
+```python
+@tf.function()
+```
+舉例說明  
+```python
+@tf.function()  
+def run_graph(batch_size, ebno_db):
+    print(f"Tracing run_graph for values batch_size={batch_size} and ebno_db={ebno_db}.")
+    return model_coded_awgn(batch_size, ebno_db)
+```
+1. `@tf.function()`: 開啟 Graph mode。這段函式的所有TensorFlow操作都會變成靜態圖的一部分
+2. `def run_graph(batch_size, ebno_db)`: 定義一個叫做 run_graph 的函式，輸入為兩個參數
+3. `print()`: 因為現在是 Graph mode ，**所以這行只會在 trace階段印出一次，也就是說，只要輸入類型或形狀沒改變，就不會再次印出這行**
+4. `return model_coded_awgn()`: 回傳函式的結果
+
+反例: 即使你有 @tf.function，但若傳入的是 Python 數值而非 Tensor，還是會每次 retrace  
+```python
+batch_size = 10
+ebno_db = 1.5
+run_graph(batch_size, ebno_db)
+```
+
+#### 第一次呼叫 run_graph() 時  
+print() 這一行會被執行一次，因為 TensorFlow 會對這個函式進行 trace，並把它轉換成一個靜態的計算圖  
+什麼是 Trace?  
+* TensorFlow 為了將 Python 函式變成Graph，第一次執行時會根據當下的輸入資料型別與形狀，建構對應的計算圖
+* 這個過程就叫做tracing
+* 當 trace 完成後，未來如果你再次用相同資料型別與形狀呼叫它，TensorFlow 就會重用這個靜態圖，而不會重複執行 print()這個 python code
+* **所以即便更改了輸入的值，只要資料型別與形狀的話，就不用重新Graph一次**
+* **未來只需利用先前建立好的 Graph來進行計算即可，因為已經編譯好了**
+
+#### 第二次呼叫 run_graph() 時  
+由於輸入的形狀與型別沒有改變，因此會使用第一次 trace 過後所產生的 Graph  
+* 這正是 Graph mode 的效能優勢來源：只需要建立一次圖，就能在之後重複使用。
+* 也就是說：你的 Python print() 不會再執行，因為它只在 trace 階段執行一次。
+
+
+
