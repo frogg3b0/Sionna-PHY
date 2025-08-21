@@ -245,12 +245,13 @@ a, tau = CDL(batch_size=BATCH_SIZE,
 * ICI
 * CP
 
+首先，模擬上行鏈路通訊的過程  
 程式範例
 ```python
 NUM_BITS_PER_SYMBOL = 2 # QPSK
 CODERATE = 0.5
 
-n = int(RESOURCE_GRID.num_data_symbols*NUM_BITS_PER_SYMBOL)
+n = int(RESOURCE_GRID.num_data_symbols*NUM_BITS_PER_SYMBOL) 
 k = int(n*CODERATE)
 
 binary_source = sn.phy.mapping.BinarySource()
@@ -263,6 +264,158 @@ lmmse_equ = sn.phy.ofdm.LMMSEEqualizer(RESOURCE_GRID, STREAM_MANAGEMENT)
 demapper = sn.phy.mapping.Demapper("app", "qam", NUM_BITS_PER_SYMBOL)
 decoder = sn.phy.fec.ldpc.LDPC5GDecoder(encoder, hard_out=True)
 ```
+* `n`: 整個 OFDM Resource Grid裡，一共可以傳送多少**編碼後的bits**
+    * `RESOURCE_GRID.num_data_symbols`: OFDM Resource Grid 中，所有可用來放資料的**符號總數**
+    * `NUM_BITS_PER_SYMBOL`
+* `k`: 原始資料的bits數，會根據通道碼的碼率`CODERATE`去反推可以傳多少bits
+* `binary_source`: 建立隨機資料產生器，產出 0/1 二位元 bit
+* `encoder`: 建立 LDPC 通道編碼器，將 k 個資訊 bits 編碼成 n 個 冗餘保護的 bits
+* `mapper`: 將每組 `NUM_BITS_PER_SYMBOL` bits 映射成一個 QAM symbol
+* `rg_mapper`: 將所有 QAM symbols 依照 `RESOURCE_GRID` 中規定的位置 排入 OFDM 資源格子 (見本篇前半段內容)
+* `channel`: 使用 CDL Channel model, 考慮AWGN, 對通道增益normalize, 回傳h(f)給receiver端做估計
+* `ls_est`: 做 Least square estimation
+* `lmmse_equ`: 使用 LMMSE（最小均方誤差） 進行通道等化
+* `demapper`: 將 QAM symbol ➜ soft LLRs
+* `decoder`: 解碼，接收 n 個 LLR回復出 k 個資訊 bits。 `hard_out=True` 表示輸出最終 0/1 決策
+
+接著要模擬上行鏈路通訊傳輸過程，每個階段各層輸出的shape  
+程式範例  
+```python
+no = sn.phy.utils.ebnodb2no(ebno_db=10.0,
+                            num_bits_per_symbol=NUM_BITS_PER_SYMBOL,
+                            coderate=CODERATE,
+                            resource_grid=RESOURCE_GRID)
+
+
+bits = binary_source([BATCH_SIZE, NUM_UT, RESOURCE_GRID.num_streams_per_tx, k])
+codewords = encoder(bits)
+x = mapper(codewords)
+x_rg = rg_mapper(x)
+
+# Channel
+y, h_freq = channel(x_rg, no)
+print("Shape of y_rg: ", y.shape)
+print("Shape of h_freq: ", h_freq.shape)
+
+# Receiver
+h_hat, err_var = ls_est (y, no)
+x_hat, no_eff = lmmse_equ(y, h_hat, err_var, no)
+llr = demapper(x_hat, no_eff)
+bits_hat = decoder(llr)
+
+print("Shape of bits: ", bits.shape)
+print("Shape of codewords: ", codewords.shape)
+print("Shape of x: ", x.shape)
+print("Shape of x_rg: ", x_rg.shape)
+print("Shape of h_hat: ", h_hat.shape)
+print("Shape of err_var: ", err_var.shape)
+print("Shape of x_hat: ", x_hat.shape)
+print("Shape of no_eff: ", no_eff.shape)
+print("Shape of llr: ", llr.shape)
+print("Shape of bits_hat: ", bits_hat.shape)
+```
+輸出
+```
+Shape of bits:  (128, 1, 1, 912)  
+Shape of codewords:  (128, 1, 1, 1824)  
+Shape of x:  (128, 1, 1, 912)  
+Shape of x_rg:  (128, 1, 1, 14, 76)  
+Shape of y_rg:  (128, 1, 4, 14, 76)  
+Shape of h_freq:  (128, 1, 4, 1, 1, 14, 76)  
+Shape of h_hat:  (128, 1, 4, 1, 1, 14, 76)  
+Shape of err_var:  (1, 1, 1, 1, 1, 14, 76)  
+Shape of x_hat:  (128, 1, 1, 912)  
+Shape of no_eff:  (128, 1, 1, 912)  
+Shape of llr:  (128, 1, 1, 1824)  
+Shape of bits_hat:  (128, 1, 1, 912)  
+```
+
+***
+
+### 定義一個可重複模擬 OFDM 傳輸系統的模型類別
+包含發送端、通道、接收端（含 LS 或 perfect CSI），並能在呼叫時自動模擬一整個 batch 的 bit 傳輸與解碼  
+<img width="737" height="485" alt="image" src="https://github.com/user-attachments/assets/579031e0-5efd-434b-853d-47f37ab4d5a2" />  
+
+```python
+model = OFDMSystem(perfect_csi=True)
+bits, bits_hat = model(batch_size=128, ebno_db=10.0)
+```
+只要用這行code就能快速模擬上圖的整套流程，他就會自動執行:  
+1. 產生亂數位元
+2. 做 LDPC 編碼 + QAM 映射 + OFDM 映射
+3. 傳送過 CDL 通道 + AWGN
+4. 使用 Perfect CSI 或 LS channel estimation
+5. 做 LMMSE 等化、解調、解碼
+6. 回傳原始 bit 與解碼 bit，計算 BER
+
+實作程式碼細節
+
+```python
+class OFDMSystem(Model): # Inherits from Keras Model
+
+    def __init__(self, perfect_csi):
+        super().__init__() # Must call the Keras model initializer
+
+        self.perfect_csi = perfect_csi
+
+        n = int(RESOURCE_GRID.num_data_symbols*NUM_BITS_PER_SYMBOL) # Number of coded bits
+        k = int(n*CODERATE) # Number of information bits
+        self.k = k
+        # 發射端
+        self.binary_source = sn.phy.mapping.BinarySource()                 # 產生隨機 bits
+        self.encoder = sn.phy.fec.ldpc.LDPC5GEncoder(k, n)                 # LDPC 編碼，將 k bits → n bits
+        self.mapper = sn.phy.mapping.Mapper("qam", NUM_BITS_PER_SYMBOL)    # 將編碼後的 bits 做 QAM 映射
+        self.rg_mapper = sn.phy.ofdm.ResourceGridMapper(RESOURCE_GRID)     # 把符號排入 OFDM 網格
+        # 接收端
+        self.channel = sn.phy.channel.OFDMChannel(CDL, RESOURCE_GRID, add_awgn=True, normalize_channel=True, return_channel=True)
+        self.ls_est = sn.phy.ofdm.LSChannelEstimator(RESOURCE_GRID, interpolation_type="nn")  # 用 pilot + interpolation 估計頻域通道
+        self.lmmse_equ = sn.phy.ofdm.LMMSEEqualizer(RESOURCE_GRID, STREAM_MANAGEMENT)         # LMMSE Equalizer
+        self.demapper = sn.phy.mapping.Demapper("app", "qam", NUM_BITS_PER_SYMBOL)            # 把符號轉回 LLR（log-likelihood ratio） 
+        self.decoder = sn.phy.fec.ldpc.LDPC5GDecoder(self.encoder, hard_out=True)             # 將 LLR 解成 bit，輸出 hard decision
+
+    @tf.function # Graph execution to speed things up
+    def __call__(self, batch_size, ebno_db):
+        no = sn.phy.utils.ebnodb2no(ebno_db, num_bits_per_symbol=NUM_BITS_PER_SYMBOL, coderate=CODERATE, resource_grid=RESOURCE_GRID)
+
+        # Transmitter
+        bits = self.binary_source([batch_size, NUM_UT, RESOURCE_GRID.num_streams_per_tx, self.k])
+        codewords = self.encoder(bits)
+        x = self.mapper(codewords)
+        x_rg = self.rg_mapper(x)
+
+        # Channel
+        y, h_freq = self.channel(x_rg, no)
+
+        # Receiver
+        if self.perfect_csi:
+            h_hat, err_var = h_freq, 0.
+        else:
+            h_hat, err_var = self.ls_est (y, no)
+        x_hat, no_eff = self.lmmse_equ(y, h_hat, err_var, no)
+        llr = self.demapper(x_hat, no_eff)
+        bits_hat = self.decoder(llr)
+
+        return bits, bits_hat
+```
+
+#### `__init__()`: 定義整體通訊模組  
+這部分會定義這個class
+* 在傳送端: 要產生多少bit、如何做通道編碼、編碼後的bit要用哪種方式mapping (e.g. QAM)等等
+* 在接收端: 要如何估計通道、如何Equalizer、如何demapping等等
+
+#### `call()`: 輸入 batch_size, ebno_db 呼叫主程式
+這是一個端對端的模擬流程，會從生成位元 → 編碼 → 映射 → OFDM Resource Grid 映射 → 傳送 → 接收 → 等化 → 解調 → 解碼，最後輸出原始位元與解碼後的位元，讓你做錯誤率分析  
+
+#### 如何使用這個 class
+1. 定義系統: `model = OFDMSystem(perfect_csi=True)`
+2. 呼叫主程式，並輸入參數 `batch_size, ebno_db`，這會自動呼叫 __call__()，完成：bit → 編碼 → QAM → OFDM → 通道 → 等化 → 解調 → 解碼
+<img width="1368" height="900" alt="image" src="https://github.com/user-attachments/assets/276b20ad-bc69-42ea-8499-acd61535ea02" />
+
+
+
+
+
+
 
 
 
