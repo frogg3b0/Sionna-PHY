@@ -235,6 +235,35 @@ a, tau = CDL(batch_size=BATCH_SIZE,
 * 在每一個 OFDM symbol 的期間內，通道保持不變（quasi-static）。
 * 因此，不會模擬到因通道變化導致的 子載波間干擾（ICI)
 
+使用 `OFDMChannel` 模組，來執行 frequency domain 的通道模擬，這個模組的功能包含:  
+* 對通道脈衝取樣
+* 計算頻遇響應: 將 CIR 做 Fourier transform
+* 將通道響應H(f)乘上輸入訊號X(f)
+
+使用`TimeChannel`模組，來執行 time domain 的通道模擬，這個模組可以計算
+* Doppler
+* ICI
+* CP
+
+程式範例
+```python
+NUM_BITS_PER_SYMBOL = 2 # QPSK
+CODERATE = 0.5
+
+n = int(RESOURCE_GRID.num_data_symbols*NUM_BITS_PER_SYMBOL)
+k = int(n*CODERATE)
+
+binary_source = sn.phy.mapping.BinarySource()
+encoder = sn.phy.fec.ldpc.LDPC5GEncoder(k, n)
+mapper = sn.phy.mapping.Mapper("qam", NUM_BITS_PER_SYMBOL)
+rg_mapper = sn.phy.ofdm.ResourceGridMapper(RESOURCE_GRID)
+channel = sn.phy.channel.OFDMChannel(CDL, RESOURCE_GRID, add_awgn=True, normalize_channel=True, return_channel=True)
+ls_est = sn.phy.ofdm.LSChannelEstimator(RESOURCE_GRID, interpolation_type="nn")
+lmmse_equ = sn.phy.ofdm.LMMSEEqualizer(RESOURCE_GRID, STREAM_MANAGEMENT)
+demapper = sn.phy.mapping.Demapper("app", "qam", NUM_BITS_PER_SYMBOL)
+decoder = sn.phy.fec.ldpc.LDPC5GDecoder(encoder, hard_out=True)
+```
+
 
 
 
