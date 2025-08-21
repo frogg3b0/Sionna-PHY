@@ -168,16 +168,76 @@ BS_ARRAY.show();
 
 ***
 
-## Channel Model
-Sionna 支援多種通道模型，這些模型來自 3GPP TR 38.901 標準：  
-* CDL（Clustered Delay Line）
-* TDL（Tapped Delay Line）
-* UMi（Urban Micro）
-* UMa（Urban Macro）
-* RMa（Rural Macro）
+## Channel Model
+Sionna 支援多種通道模型，這些模型來自 [3GPP TR 38.901](https://portal.3gpp.org/desktopmodules/Specifications/SpecificationDetails.aspx?specificationId=3173) 標準：  
+* CDL: 支援單一使用者（Single-User），但可以有多根天線（MIMO）
+* TDL: 用於 SISO（單輸入單輸出）通道模擬，無法模擬 MIMO
+* UMi: 支援單一使用者（Single-User），但可以有多根天線（MIMO）
+* UMa: 支援單一使用者（Single-User），但可以有多根天線（MIMO）
+* RMa: 支援單一使用者（Single-User），但可以有多根天線（MIMO）
 * 此外還支援 Rayleigh block fading，這是較簡化的隨機通道模型    
 
-這些模型模擬了不同場景下的通道衰減、角度分佈、時延擴散、移動速度等無線通道特性，能幫助建立現實世界中更真實的 MIMO 傳輸模擬。
+這些模型模擬了不同場景下的通道衰減、角度分佈、時延擴散、移動速度等無線通道特性，能幫助建立現實世界中更真實的 MIMO 傳輸模擬。  
+補充說明: TDL/CDL的每個 path都有固定的 power delay profile與固定的AoA / AoD。換句話說，它們是 deterministic，並非隨機生成  
+
+### 首先考慮3GPP CDL model
+point-to-point流程如下  
+<img width="569" height="246" alt="image" src="https://github.com/user-attachments/assets/137692ab-d05f-4343-808a-5ea5a4fc56db" />  
+
+```python
+DELAY_SPREAD = 100e-9                               # 訊號因多路徑，到達接收端時間差異的分布              
+DIRECTION = "uplink"                                # 決定誰是TX，誰是RX
+CDL_MODEL = "C"                                     # CDL 模型族群中的 Model C 作為目前的通道設定
+SPEED = 10.0                                        # 使用者UT的移動速度 [m/s]
+
+# 根據上述參數，建構 CDL 通道模型
+CDL = sn.phy.channel.tr38901.CDL(CDL_MODEL,         # 使用 3GPP 38.901 CDL model 
+                                 DELAY_SPREAD,      # 輸入delay spread
+                                CARRIER_FREQUENCY,  # 輸入載波頻率
+                                UT_ARRAY,           # 指定使用 UT_ARRAY 做為使用者端的天線陣列
+                                BS_ARRAY,           # 指定使用 BS_ARRAY 做為基地台端的天線陣列
+                                DIRECTION,          # uplink/downlink
+                                min_speed=SPEED)    # 用戶移動速度
+```
+建立好的 CDL 可以被用來隨機產生通道脈衝響應 (CIR)，包含  
+* 每條路徑的複數增益 a
+* 對應的 delay 𝜏
+
+為了模擬 time-varying channel，我們會以某個取樣頻率對CIR進行多次取樣，通常會取 OFDM symbol 次，取樣流程舉例如下:  
+1. 先在time-domain建立delay tap，每個tap間隔為 T
+2. 所以我們在time-domain上就會有[0,T,2T...NT]這些N個離散的tap
+3. 接著把原始的通道脈衝響應對應到最近的tap上
+4. 像是: 0ns->0 th tap； 5ns->2 nd tap； 8ns -> 4th tap
+5. 如果我們在建立delay tap的時候，把時間切分得越細(也就是取樣頻率越高)，就能降低量化誤差
+
+在後面的程式碼段中就實際執行了這個 sampling 動作  
+```python
+BATCH_SIZE = 128 
+a, tau = CDL(batch_size=BATCH_SIZE,
+             num_time_steps=RESOURCE_GRID.num_ofdm_symbols,
+             sampling_frequency=1/RESOURCE_GRID.ofdm_symbol_duration)
+```
+
+* 在「觀察的時間區間」內，延遲 𝜏𝑙 被視為固定不變，也就是說，每一條路徑的 delay 是定值
+* 隨時間改變的是：每一條路徑的複數衰減係數 𝑎𝑙(𝑡)，它是 time-varying
+
+#### <在某個時間點t=定值，其對應的多條路徑CIR，即 ℎ(𝑡=定值, 𝜏)>
+<img width="591" height="451" alt="image" src="https://github.com/user-attachments/assets/9c7c1f4f-6230-4064-9c5b-1a719cba450a" />  
+
+#### <某一條路徑𝜏=定值，隨著不同時間點的gain，即 ℎ(𝑡, 𝜏=定值)>
+<img width="571" height="448" alt="image" src="https://github.com/user-attachments/assets/5adc61c2-d89b-4ffe-974f-57f16b8e447f" />
+
+***
+
+## Uplink Transmission in the Frequency Domain
+本章節開始進行「上行鏈路的通訊模擬」，特別是在frequency domain  
+為了這樣的建模，做出一個假設：  
+* 在每一個 OFDM symbol 的期間內，通道保持不變（quasi-static）。
+* 因此，不會模擬到因通道變化導致的 子載波間干擾（ICI)
+
+
+
+
 
 
 
