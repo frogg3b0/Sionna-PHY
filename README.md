@@ -15,12 +15,15 @@
 
 ***
 
-### 本次教學總共分成五個章節，分別為  
+### 給初學者
 * Part 0: "Hellow world!"
 * Part 1: Getting Started with Sionna
 * Part 2: Differentiable Communication Systems
 * Part 3: Advanced Link-level Simulations
 * Part 4: Toward Learned Receivers
+* Part 5: Basic MIMO Simulations
+* Part 6:Pulse-shaping Basics
+* Part 7:Optical Channel with Lumped Amplification
 
 ### 給進階開發者
 進階使用者可參閱後續內容，以深入理解 Sionna PHY 的內部運作方式，並學習如何擴展與自訂物理層演算法。
