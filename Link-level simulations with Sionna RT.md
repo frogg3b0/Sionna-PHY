@@ -159,7 +159,7 @@ max_gain_db = 0
 min_dist = 5 
 max_dist = 400 
 
-# Sample batch_size random user positions from the radio map
+# 從 Radio Map 符合條件的「可通訊位置集合」中，隨機抽樣出 `num_pos=batch_size_cir` 個點作為**UE 實際擺放的位置**
 ue_pos, _ = rm.sample_positions(num_pos=batch_size_cir,
                                 metric="path_gain",
                                 min_val_db=min_gain_db,
@@ -172,9 +172,139 @@ ue_pos, _ = rm.sample_positions(num_pos=batch_size_cir,
 * path gain 超過 0 db 的 path
 * 距離 RX 超過 400m 的位置
 * 距離 RX 小於 5m 的位置
+* 所有符合這些條件的離散 points 構成候選集合（可能數千、數萬個）
 
-接著根據上述條件，從 Radio Map 中**篩選出合法的 UE 位置候選點**
+接著根據上述條件，從 Radio Map 符合條件的「可通訊位置集合」中，隨機抽樣出 `num_pos=batch_size_cir` 個點作為**UE 實際擺放的位置**
 
+### Step 6. 將 UE 位置轉化為場景中的 Receiver 物件
+#### Step 6.1. 為所有接收器（UE）統一指定一個天線陣列樣式
+```python
+scene.rx_array = PlanarArray(num_rows=1,             # 設定天線幾何形狀為 1×2 的平面陣列 
+                             num_cols=num_tx_ant//2, # Each receiver is equipped with 4 antennas
+                             vertical_spacing=0.5,
+                             horizontal_spacing=0.5,
+                             pattern="iso",          # 天線單元為各向同性（isotropic）
+                             polarization="cross")   # 每個天線單元使用雙極化（cross-polarized）
+```
+
+#### Step 6.2. Receiver 建立與加入場景
+```python
+for i in range(batch_size_cir):                            # 建立 batch_size_cir 個 UE Receiver
+    scene.remove(f"rx-{i}")                                # 每次重跑前清除舊物件   
+    rx = Receiver(name=f"rx-{i}",                          # 給每個 Receiver 命名 (e.g. rx-0, rx-1)   
+                  position=ue_pos[0][i],                   # 將第 i 個由 Radio Map 抽樣的位置作為 RX 的位置
+                  velocity=(3.,3.,0),                      # 指定該 RX（UE）的速度向量
+                  display_radius=1.,                       # 僅用於可視化：畫出 RX 為一個半徑 1 公尺的球體
+                  color=(1,0,0)                            # 僅用於可視化：將 RX 顯示為紅色 (R=1,G=0,B=0)
+                  )
+    scene.add(rx)                                          # 把剛剛創建的 rx Receiver 物件加入當前場景中
+```
+
+#### Step 6.3. 可視化場景
+```python
+# And visualize the scene
+if no_preview:
+    # Render an image
+    scene.render(camera=bird_cam,
+                 radio_map=rm,
+                 rm_vmin=-110,
+                 clip_at=12.); # Clip the scene at rendering for visualizing the refracted field
+else:
+    # Show preview
+    scene.preview(radio_map=rm,
+                  rm_vmin=-110,
+                  clip_at=12.); # Clip the scene at rendering for visualizing the refracted field
+```
+<img width="766" height="590" alt="image" src="https://github.com/user-attachments/assets/4adfc7d2-6e73-42eb-ad41-f09ba1be3965" />  
+
+* 每個點代表從 **Radio map** 的隨機取樣函數中，提取的接收機位置
+* 使在複雜場景下，這也能有效地對隨機通道實作進行批量採樣
+
+*** 
+
+## Creating a CIR Dataset
+根據事前建立好的 Radio map，現在我們就可以模擬**來自多個不同位置 UE 對應的 CIR**  
+#### Step 0. 先把觀念講清楚，假設我們想提取 `target_num_cirs = 5000` 個 CIR
+* 5000 個 CIR = 5000 個不同的 UE 位置他們各自對應的 ray tracing 路徑所構成的 CIR
+    * UE 1 自己本身會有多路徑，因此一個 UE 就會產生 1 個 CIR
+    * 因此我們只要找到 5000 個不同位置的 UE， 就能產生 5000 組 CIR
+* 具體的做法是:
+    * 每次產出 1000 個 CIR (找到1000個不同位置的用戶)
+    * 總共需要產生5次不同的模擬結果，這部分會透過`seed=idx`逐次遞增，讓我們每一輪的隨機抽樣都會**使用不同的`seed`**
+    * 最後就可以產出 5000 組 各自不同的 CIR
+* 觀念釐清之後，接下來進入程式範例
+
+#### Step 1. 初始化變數與 PathSolver 建立
+```python
+target_num_cirs = 5000    # 定義這次模擬要產生多少個不同的 CIR
+max_depth = 5             # ray tracing 可容許的最大交互次數（反射/繞射/透射最多 5 次）
+min_gain_db = -130       
+max_gain_db = 0
+min_dist = 10
+max_dist = 400 
+
+# 將多次模擬產生的 CIR 結果統一收集在這兩個 list 中，最後才會組合起來
+a_list = []              # 複數通道增益
+tau_list = []            # 對應的 delay
+
+# 因為不同位置產生的 CIR 含有的 path 數不同 ，為了之後統一 Tensor 尺寸，需要這個變數來進行 padding 對齊
+max_num_paths = 0        # 記錄目前所有 batch 中，最多的路徑數量
+
+p_solver = PathSolver()  # 建立一個射線追蹤的 path solver 物件
+```
+
+#### Step 2. 產生目標數量的 CIR
+```python
+num_runs = int(np.ceil(target_num_cirs/batch_size_cir))                          # 計算所需模擬次數
+for idx in range(num_runs):                                                       
+    print(f"Progress: {idx+1}/{num_runs}", end="\r")
+
+    # 從符合<條件>的集合中，隨機抽樣 UE 的位置
+    ue_pos, _ = rm.sample_positions(                                             
+                        num_pos=batch_size_cir,                                  # 一次抽樣 batch_size_cir 個 UE 的位置
+                        metric="path_gain",                                      # 根據何種 metric 來決定哪些位置有效
+                        min_val_db=min_gain_db,                                  # <條件1> path gain 下限
+                        max_val_db=max_gain_db,                                  # <條件2> path gain 上限
+                        min_dist=min_dist,                                       # <條件3> 和 TX 距離不能太近
+                        max_dist=max_dist,                                       # <條件4> 和 TX 距離不能太遠
+                        seed=idx)                                                # 每輪使用不同seed，確保抽樣位置不重複
+
+    # 把這一輪抽出來的使用者位置 -> 指派為接收器
+    for rx in range(batch_size_cir):
+        scene.receivers[f"rx-{rx}"].position = ue_pos[0][rx]
+
+    # 這一步會輸出所有 TX → RX 的有效路徑，並儲存在 paths 物件中
+    paths = p_solver(scene, max_depth=max_depth, max_num_paths_per_src=10**7)   
+
+    # 將 ray tracing 結果轉換為 CIR (channel impulse responses)
+    a, tau = paths.cir(sampling_frequency=subcarrier_spacing,                   # 設定時間軸上採樣頻率，這裡用 OFDM 的子載波間距 30kHz
+                         num_time_steps=14,                                     # 每個 CIR 有 14 個離散取樣點，對應到 OFDM symbol 數量
+                         out_type='numpy')                                      # 輸出格式為 numpy
+    a_list.append(a)                                                            # batch 得到的 CIR（a, tau）加進列表
+    tau_list.append(tau)
+
+    # Update maximum number of paths over all batches of CIRs
+    num_paths = a.shape[-2]
+    if num_paths > max_num_paths:
+        max_num_paths = num_paths
+```
+* 至此，收集了多次模擬的結果（每輪產生 batch_size_cir 個 CIR），累積在 `a_list` 和 `tau_list` 中  
+* 然而，每一筆 CIR 的 path 數量不同（num_paths 不固定），所以如果你直接合併這些 array，會導致形狀不一致、無法拼接
+* 因此，接下來需要
+1. 將所有 CIR padding 成統一長度: 使用 `np.pad` 使每個 `a_`, `tau_` 的 path 數都擴充到 `max_num_paths`，缺的部分補 0
+2. 將所有模擬批次的 CIR 統整為單一 array
+3. 交換 Tx 與 Rx 的維度、調整 batch 維度
+
+#### Step 3. 將不同批次模擬結果統一格式，讓其path數量統一
+```python
+a = []
+tau = []
+for a_,tau_ in zip(a_list, tau_list):
+    num_paths = a_.shape[-2]
+    a.append(np.pad(a_, [[0,0],[0,0],[0,0],[0,0],[0,max_num_paths-num_paths],[0,0]], constant_values=0))
+    tau.append(np.pad(tau_, [[0,0],[0,0],[0,max_num_paths-num_paths]], constant_values=0))
+```
+* `np.pad()`
 
 
 
