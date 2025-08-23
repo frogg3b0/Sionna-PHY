@@ -303,8 +303,214 @@ for a_,tau_ in zip(a_list, tau_list):
     num_paths = a_.shape[-2]
     a.append(np.pad(a_, [[0,0],[0,0],[0,0],[0,0],[0,max_num_paths-num_paths],[0,0]], constant_values=0))
     tau.append(np.pad(tau_, [[0,0],[0,0],[0,max_num_paths-num_paths]], constant_values=0))
+# Let's now convert to uplink direction, by switing the receiver and transmitter
+# dimensions
+a = np.transpose(a, (2,3,0,1,4,5))
+tau = np.transpose(tau, (1,0,2))
+
+# Add a batch_size dimension
+a = np.expand_dims(a, axis=0)
+tau = np.expand_dims(tau, axis=0)
+
+# Exchange the num_tx and batchsize dimensions
+a = np.transpose(a, [3, 1, 2, 0, 4, 5, 6])
+tau = np.transpose(tau, [2, 1, 0, 3])
+
+# Remove CIRs that have no active link (i.e., a is all-zero)
+p_link = np.sum(np.abs(a)**2, axis=(1,2,3,4,5,6))
+a = a[p_link>0.,...]
+tau = tau[p_link>0.,...]
+
+print("Shape of a:", a.shape)
+print("Shape of tau: ", tau.shape)
 ```
-* `np.pad()`
+輸出:  
+```python
+Shape of a: (4727, 1, 16, 1, 4, 39, 14)
+Shape of tau:  (4727, 1, 1, 39)
+```
+
+輸出說明:  
+* 4277: 模擬完共有 4727 個 UE 的位置
+* 1: UE 對應 1 個 BS
+* 16: BS 的天線數量
+* 1: 每筆資料只有一個 UE
+* 4: UE 的天線數量
+* 39: 路徑數量
+* 14: 時間舉樣點
+
+程式碼說明:  
+* 每次模擬出來的 CIR 可能有 不一樣的 path 數
+* 因此我們找出所有 CIR 中，最大的 path 數 `max_num_paths` ，並補零至統一長度
+* `np.pad()` 說明：補零讓 `num_paths` 統一為 `max_num_paths`
+
+#### 請注意，發射器和接收器的位置已顛倒，即發射器現在表示用戶設備（每個用戶設備有 4 根天線），接收器表示基地台（有 16 根天線）
+
+#### Step 4. 現在讓我們定義一個資料產生器，它從 CIR 資料集中隨機取樣使用者裝置
+##### 觀念
+`class CIRGenerator`的功能是建立一個資料產生器，只要呼叫它就會產生 **multi-user uplink 的通道資料**:
+* 從事先模擬好的 4727筆 CIR 資料中，挑出 `num_tx` 個 UE 的 CIR 資料
+* 把這些 UE 的資料 stack 起來，讓我們後續能一次輸出整個 multi-user uplink 的 CIR
+
+程式範例  
+
+```python
+class CIRGenerator:
+    def __init__(self,
+                 a,
+                 tau,
+                 num_tx):
+
+        # Copy to tensorflow
+        self._a = tf.constant(a, tf.complex64)
+        self._tau = tf.constant(tau, tf.float32)
+        self._dataset_size = self._a.shape[0]
+
+        self._num_tx = num_tx
+
+    def __call__(self):
+
+        # Generator implements an infinite loop that yields new random samples
+        while True:
+            # Sample 4 random users and stack them together
+            idx,_,_ = tf.random.uniform_candidate_sampler(
+                            tf.expand_dims(tf.range(self._dataset_size, dtype=tf.int64), axis=0),
+                            num_true=self._dataset_size,
+                            num_sampled=self._num_tx,
+                            unique=True,
+                            range_max=self._dataset_size)
+
+            a = tf.gather(self._a, idx)
+            tau = tf.gather(self._tau, idx)
+
+            # Transpose to remove batch dimension
+            a = tf.transpose(a, (3,1,2,0,4,5,6))
+            tau = tf.transpose(tau, (2,1,0,3))
+
+            # And remove batch-dimension
+            a = tf.squeeze(a, axis=0)
+            tau = tf.squeeze(tau, axis=0)
+
+            yield a, tau
+
+```
+##### 第一步: 隨機選出多個 UE 的索引  
+* `self._dataset_size = 4727`（假設你先傳進來的 a 有 4727 個 UE）
+* `self._num_tx = 4`（表示你想模擬 multi-user uplink 中有 4 個 UE 同時傳送）
+* 這段程式會從 4727 個 UE 中，隨機選出 4 個不同的 UE index → 存進 idx。
+
+##### 第二步: 從dataset中提取這些UE的CIR  
+* 對於 a：從 shape 為 (4727, 1, 16, 1, 4, 39, 14) 的張量中，選出 4 個 sample
+* 所以新 shape 變成 (4, 1, 16, 1, 4, 39, 14)
+    * 第 0 維：其實是 num_tx = 4，代表有 4 個不同 UE，每個都有一筆 CIR
+    * 第 3 維：固定是 1，代表原本的每筆 CIR 都是「獨立的單一 UE」
+    * 也就是說：你其實是擁有**4 筆 獨立的 UE CIR 資料**
+* tau 同理，變成 (4, 1, 1, 39)
+這就代表你現在有「4 個 UE → 傳送給同一個 BS」的 uplink CIR 資料
+
+##### 第三步: 將原本「4個 UE 獨立的 CIR 資料」重新組裝成「一筆包含多個 UE 的 multi-user uplink CIR」格式
+* `a = tf.transpose(a, (3,1,2,0,4,5,6))`: 把第 0 維和第 3 維互換
+    * 以前是 4 筆單獨的 UE 資料，現在變成 1 筆包含 4 個 UE 的 multi-user uplink 資料
+    * 新的 a.shape: (1, 1, 16, 4, 4, 39, 14)
+* `tau = tf.transpose(tau, (2,1,0,3))`
+
+##### 第四步: 移除 batch_size = 1 維度  
+* `a = tf.squeeze(a, axis=0)`: 去除第0維
+* `tau = tf.squeeze(tau, axis=0)`: 去除第0維
+
+最後: 用`yield`輸出  
+* 因為 `CIRGenerator` 無限循環的資料提供器，每次都要抽出一批新的 UE 資料
+* 如果用 `return` ，執行一次就結束整個函數，下次不能再拿下一批資料了
 
 
+#### Step 5. 把模擬的 CIR 資料，包裝成一個可以直接 plug-in 到 Sionna OFDMChannel
+* 這一段，會使用 Sionna 提供的 `CIRDataset` class
+* 它會把 CIR 包裝成一個「符合 Sionna 標準介面」的 channel model，供 [OFDMChannel](https://nvlabs.github.io/sionna/phy/api/channel.wireless.html#sionna.phy.channel.OFDMChannel) 使用
+```python
+batch_size = 20 # Must be the same for the BER simulations as CIRDataset returns fixed batch_size
 
+# Init CIR generator
+cir_generator = CIRGenerator(a,
+                             tau,
+                             num_tx)
+# Initialises a channel model that can be directly used by OFDMChannel layer
+channel_model = CIRDataset(cir_generator,
+                           batch_size,
+                           num_rx,
+                           num_rx_ant,
+                           num_tx,
+                           num_tx_ant,
+                           max_num_paths,
+                           num_time_steps)
+```
+
+* `batch_size = 20`: 設定要一次從 CIRDataset 拿出多少筆資料。這個值要與後續的 BER 模擬使用的 batch 大小一致，否則會出現 shape 不相容錯誤
+* `cir_generator = CIRGenerator(a, tau, num_tx)`: 建立一個資料生成器 CIRGenerator（前面你已經學過了），他會:
+    *  從 a 和 tau（多個 UE 的 CIR）中，隨機抽出 num_tx 個 UE
+    *  把它們對應的 CIR（通道係數與延遲）疊在一起，每次都產出一個新的 batch
+* `channel_model = CIRDataset()`: 呼叫 Sionna 提供的 `CIRDataset` class，它會把 CIR 包裝成一個「符合 Sionna 標準介面」的 channel model，供 OFDMChannel 使用
+
+#### 補充: 生成 `OFDMChannel` `h_freq`: 
+* 在前面，我們已經完成了 `channel_model = CIRDataset(...)`這一步，代表已經用 ray-traced CIR 資料成功建立了一個可被 Sionna 認識的通道模型
+* 接下來可以透過以下code，生成Channel frequency responses
+* 用來給你每個 OFDM symbol、每個子載波的頻域產生channel coefficient
+
+##### 第一步，準備 `resource_grid`
+
+```python
+from sionna.phy import ResourceGrid
+
+resource_grid = ResourceGrid(num_ofdm_symbols=14,        # OFDM symbols per slot
+                             num_subcarriers=72,         # subcarriers
+                             subcarrier_spacing=30e3,    # 30 kHz
+                             num_tx=4,                   # Number of UEs (TXs)
+                             num_rx=1,                   # 1 base station
+                             num_tx_ant=4,               # per UE
+                             num_rx_ant=16,              # at BS
+                             cp_length=72)               # CP samples
+```
+
+##### 第二步，建立頻域通道生成器 `GenerateOFDMChannel`
+
+```python
+from sionna.phy.channel import GenerateOFDMChannel
+
+channel_freq_generator = GenerateOFDMChannel(channel_model=channel_model,
+                                              resource_grid=resource_grid,
+                                              normalize_channel=True)
+
+```
+* `Channel_model`: 是剛剛由 ray traced CIR 資料轉換而來的
+
+
+##### 第三步，產生頻域通道響應 (Channel frequency responses)
+
+```python
+batch_size = 20
+h_freq = channel_freq_generator(batch_size)
+```
+* input: `batch_size`
+* `output`: `h_freq`
+    * shape: [batch_size, num_rx, num_rx_ant, num_tx, num_tx_ant, num_ofdm_symbols, num_subcarriers]
+ 
+***
+
+## PUSCH Link-Level Simulations
+* 除了丟到上述的 `OFDMChannel`之外，這段程式碼也能進行端對端 5G NR PUSCH uplink 傳輸的 BER 模擬
+* 此模型針對符合 5G NR PUSCH 規範的多用戶 MIMO 上行通道運行 BER 模擬。
+
+### Step 1. 你已經完成的部分（CIRDataset）
+```python
+channel_model = CIRDataset(
+    cir_generator,
+    batch_size,
+    num_rx,
+    num_rx_ant,
+    num_tx,
+    num_tx_ant,
+    max_num_paths,
+    num_time_steps
+)
+```
+
+### Step 2. 
